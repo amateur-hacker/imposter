@@ -7,8 +7,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: "Play the classic word imposter game with AI friends anytime.",
     start_url: "/",
     display: "standalone",
-    background_color: "#0f172a",
-    theme_color: "#6366f1",
+    background_color: "#171717",
+    theme_color: "#171717",
     icons: [
       { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
       { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
