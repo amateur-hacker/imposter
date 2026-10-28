@@ -566,7 +566,7 @@ export default function GamePage() {
               if (!currentVoter) {
                 return (
                   <p className="text-sm text-muted-foreground">
-                    All votes are in — tallying the results…
+                    All votes are in — counting the results…
                   </p>
                 );
               }
@@ -575,7 +575,7 @@ export default function GamePage() {
                   <p className="text-sm text-muted-foreground">
                     {upNextVoter
                       ? `Up next: ${upNextVoter.name}`
-                      : "Last vote — tallying after this…"}
+                      : "Last vote — counting after this…"}
                   </p>
                   {currentVoter.type === "ai" ? (
                     <div className="flex items-center gap-2 text-muted-foreground">
