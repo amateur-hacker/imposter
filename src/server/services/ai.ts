@@ -84,31 +84,24 @@ Strategy: Look for contradictions, vagueness, or clues that don't fit. Protect y
   return others[Math.floor(Math.random() * others.length)].id;
 }
 
-export interface AIGuessContext {
-  playerName: string;
-  personality: string;
-  category: string;
-  clues: { name: string; clue: string }[];
-}
-
-export async function generateGuess(ctx: AIGuessContext): Promise<string> {
-  const clues = ctx.clues.map((c) => `${c.name}: ${c.clue}`).join("\n");
-  const prompt = `You are ${ctx.playerName}, the Imposter. Category: ${ctx.category}.
-Clues given by crew:
-${clues}
-Infer the secret word from the clues. Reply with ONLY the word. No extra text.`;
-  const out = await chat(prompt, 20);
-  return out.split(/\s+/)[0]?.replace(/[^a-zA-Z]/g, "") || "";
-}
-
-export async function generateSecretWord(): Promise<{
-  category: string;
-  word: string;
-}> {
+export async function generateSecretWord(
+  categories?: string[],
+  difficulty: string = "moderate",
+): Promise<{ category: string; word: string }> {
   const seed = Date.now();
-  const prompt = `Pick a random, MODERATE-difficulty secret word for a party word-guessing game. Seed: ${seed}.
+  const categoryLine =
+    categories && categories.length > 0
+      ? `Pick a category ONLY from this list: ${categories.join(", ")}.`
+      : "Choose any simple category (Animals, Food, Places, Objects, Jobs, Sports, Nature, Music, etc.).";
+  const difficultyLine =
+    difficulty === "easy"
+      ? "Use a very common, everyday word that everyone knows."
+      : difficulty === "hard"
+        ? "Use a trickier, less obvious word that makes players think."
+        : "Use a common, everyday word (not obscure).";
+  const prompt = `Pick a random secret word for a party word-guessing game. Seed: ${seed}.
 Return ONLY valid JSON like: {"category":"Food","word":"Sushi"}
-Use common, everyday words (not obscure). Word can be one or two words. Categories: Animals, Food, Places, Objects, Jobs, Sports, Nature, etc. Make it different each time. No markdown.`;
+${categoryLine} ${difficultyLine} Word can be one or two words. Make it different each time. No markdown.`;
   const out = await chat(prompt, 40);
   try {
     const match = out.match(/\{[\s\S]*\}/);
@@ -122,11 +115,20 @@ Use common, everyday words (not obscure). Word can be one or two words. Categori
   return randomWord();
 }
 
+export const DEFINITION_LANGUAGES: Record<string, string> = {
+  en: "English",
+  hi: "Hindi",
+  es: "Spanish",
+  fr: "French",
+};
+
 export async function generateDefinition(
   word: string,
   category: string,
+  language: string = "en",
 ): Promise<string> {
-  const prompt = `Explain the word "${word}" (category: ${category}) in one short, simple sentence for a party game player who may not know it. Plain everyday language, no markdown, max 25 words.`;
+  const langName = DEFINITION_LANGUAGES[language] ?? "English";
+  const prompt = `Explain the word "${word}" (category: ${category}) in one short, simple sentence for a party game player who may not know it. Reply in ${langName}. Plain everyday language, no markdown, max 25 words.`;
   const out = await chat(prompt, 60);
   return (
     out

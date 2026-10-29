@@ -5,9 +5,10 @@ import {
   createGame,
   getPublicState,
   loadGame,
+  revealWord,
+  startClues,
   startVoting,
   submitClue,
-  submitGuess,
   submitVote,
 } from "@/server/services/gameEngine";
 import { requireAuth } from "../middleware/auth";
@@ -21,23 +22,62 @@ app.post("/create", async (c) => {
   const userName = (c as any).get("userName") as string;
   const body = await c.req.json().catch(() => ({}));
   const schema = z.object({
-    opponentCount: z.union([z.literal(3), z.literal(5), z.literal(7)]),
+    opponentCount: z
+      .union([z.literal(3), z.literal(5), z.literal(7)])
+      .optional(),
     players: z
-      .array(z.object({ type: z.enum(["ai", "manual"]) }))
+      .array(
+        z.object({
+          type: z.enum(["ai", "manual"]),
+          name: z.string().max(24).optional(),
+        }),
+      )
       .min(3)
-      .max(7),
+      .max(8),
+    ownName: z.string().max(24).optional(),
+    suggestClues: z.boolean().optional(),
+    timerSeconds: z.number().int().min(0).max(3600).optional(),
+    categories: z.array(z.string().max(24)).max(3).optional(),
+    difficulty: z.enum(["easy", "moderate", "hard"]).optional(),
     category: z.string().optional(),
   });
   const parsed = schema.safeParse(body);
   if (!parsed.success) return c.json({ error: "Invalid payload" }, 400);
-  if (parsed.data.players.length !== parsed.data.opponentCount) {
+  const types = new Set(parsed.data.players.map((p) => p.type));
+  if (types.size > 1) {
+    return c.json(
+      { error: "Mixing AI and manual players is not supported" },
+      400,
+    );
+  }
+  const isManual = parsed.data.players.some((p) => p.type === "manual");
+  if (isManual) {
+    // Manual mode: every seat is a named player, 4/6/8 total, at least one human.
+    if (![4, 6, 8].includes(parsed.data.players.length)) {
+      return c.json({ error: "Manual games need 4, 6 or 8 players" }, 400);
+    }
+    if (!parsed.data.players.some((p) => p.type === "manual")) {
+      return c.json(
+        { error: "Manual games need at least one human player" },
+        400,
+      );
+    }
+  } else if (
+    ![3, 5, 7].includes(parsed.data.players.length) ||
+    parsed.data.players.length !== parsed.data.opponentCount
+  ) {
     return c.json({ error: "Player count mismatch" }, 400);
   }
   const gameId = await createGame({
     userId,
     userName,
-    opponentCount: parsed.data.opponentCount,
+    ownName: parsed.data.ownName,
+    opponentCount: parsed.data.opponentCount ?? parsed.data.players.length,
     players: parsed.data.players,
+    suggestClues: parsed.data.suggestClues,
+    timerSeconds: parsed.data.timerSeconds,
+    categories: parsed.data.categories,
+    difficulty: parsed.data.difficulty,
     category: parsed.data.category,
   });
   const state = await getPublicState(gameId, userId);
@@ -82,6 +122,15 @@ app.post("/:id/clue", async (c) => {
   return c.json({ state });
 });
 
+app.post("/:id/start-clues", async (c) => {
+  const userId = (c as any).get("userId") as string;
+  const id = c.req.param("id");
+  const res = await startClues(id, userId);
+  if (!res.ok) return c.json({ error: "invalid" }, 400);
+  const state = await getPublicState(id, userId);
+  return c.json({ state });
+});
+
 app.post("/:id/start-voting", async (c) => {
   const userId = (c as any).get("userId") as string;
   const id = c.req.param("id");
@@ -109,44 +158,49 @@ app.post("/:id/vote", async (c) => {
   return c.json({ state });
 });
 
-app.post("/:id/guess", async (c) => {
+app.post("/:id/reveal", async (c) => {
   const userId = (c as any).get("userId") as string;
   const id = c.req.param("id");
   const body = await c.req.json().catch(() => ({}));
-  const schema = z.object({
-    playerId: z.string(),
-    guess: z.string().min(1).max(50),
-  });
+  const schema = z.object({ playerId: z.string() });
   const parsed = schema.safeParse(body);
   if (!parsed.success) return c.json({ error: "Invalid payload" }, 400);
-  const res = await submitGuess(
-    id,
-    parsed.data.playerId,
-    parsed.data.guess,
-    userId,
-  );
-  if (!res.ok) return c.json({ error: res.error }, 400);
-  const state = await getPublicState(id, userId);
-  return c.json({ state });
+  const result = await revealWord(id, parsed.data.playerId, userId);
+  if (!result) return c.json({ error: "Not found" }, 404);
+  return c.json(result);
 });
 
 app.post("/:id/define", async (c) => {
   const userId = (c as any).get("userId") as string;
   const id = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  const schema = z.object({
+    playerId: z.string().optional(),
+    language: z.enum(["en", "hi", "es", "fr"]).optional(),
+  });
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) return c.json({ error: "Invalid payload" }, 400);
   const data = await loadGame(id);
   if (!data || data.game.userId !== userId)
     return c.json({ error: "Not found" }, 404);
-  const human = data.players.find((p: any) => p.type === "human");
-  const isImposter = human?.isImposter ?? false;
+  // Define the word of the requested player (owner-only game).
+  const target = parsed.data.playerId
+    ? data.players.find((p: any) => p.id === parsed.data.playerId)
+    : data.players.find((p: any) => p.type === "human");
+  if (!target) return c.json({ error: "Not found" }, 404);
   const completed = data.game.status === "completed";
   // Only ever define the word this player is allowed to see.
   const word = completed
     ? data.game.secretWord
-    : isImposter
+    : target.isImposter
       ? data.game.imposterWord
       : data.game.secretWord;
   const { generateDefinition } = await import("@/server/services/ai");
-  const definition = await generateDefinition(word, data.game.category);
+  const definition = await generateDefinition(
+    word,
+    data.game.category,
+    parsed.data.language ?? "en",
+  );
   if (!definition) return c.json({ error: "Could not define word" }, 502);
   return c.json({ definition });
 });
@@ -159,6 +213,8 @@ app.post("/:id/suggest-clues", async (c) => {
     return c.json({ error: "Not found" }, 404);
   if (data.game.phase !== "clue" || data.game.status !== "in_progress")
     return c.json({ error: "Not your clue turn" }, 400);
+  if ((data.game.config as any)?.suggestClues === false)
+    return c.json({ error: "Suggestions are disabled" }, 400);
   const turnOrder = data.game.turnOrder as string[];
   const currentId = turnOrder[data.game.currentTurnIndex];
   const current = data.players.find((p: any) => p.id === currentId);

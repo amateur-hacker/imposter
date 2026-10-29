@@ -49,6 +49,36 @@ export const CATEGORIES: Record<string, string[]> = {
     "Firefighter",
     "Detective",
   ],
+  Sports: [
+    "Soccer",
+    "Tennis",
+    "Swimming",
+    "Cricket",
+    "Boxing",
+    "Golf",
+    "Skiing",
+    "Yoga",
+  ],
+  Nature: [
+    "River",
+    "Mountain",
+    "Rainbow",
+    "Desert",
+    "Waterfall",
+    "Volcano",
+    "Island",
+    "Sunset",
+  ],
+  Music: [
+    "Guitar",
+    "Piano",
+    "Drums",
+    "Violin",
+    "Trumpet",
+    "Flute",
+    "Concert",
+    "Karaoke",
+  ],
 };
 
 export function randomWord(category?: string) {

@@ -33,7 +33,7 @@ export const games = pgTable("games", {
   opponentCount: integer("opponent_count").notNull(),
   config: jsonb("config").notNull(),
   status: text("status").notNull().default("in_progress"), // in_progress | completed | abandoned
-  phase: text("phase").notNull().default("clue"), // clue | discussion | vote | guess | results
+  phase: text("phase").notNull().default("clue"), // reveal | clue | discussion | vote | results
   turnOrder: jsonb("turn_order").notNull(), // string[]
   currentTurnIndex: integer("current_turn_index").notNull().default(0),
   winner: text("winner"), // crew | imposter

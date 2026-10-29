@@ -3,20 +3,20 @@ import { db } from "@/lib/db";
 import { clues, gamePlayers, games, guesses, votes } from "@/lib/db/schema";
 import { personalityForIndex } from "@/lib/game/personalities";
 import { randomWord } from "@/lib/game/words";
-import {
-  generateClue,
-  generateGuess,
-  generateSecretWord,
-  generateVote,
-} from "./ai";
+import { generateClue, generateSecretWord, generateVote } from "./ai";
 
-export type PlayerConfig = { type: "ai" | "manual" };
+export type PlayerConfig = { type: "ai" | "manual"; name?: string };
 
 export interface CreateGameInput {
   userId: string;
   userName: string;
-  opponentCount: number;
+  ownName?: string;
+  opponentCount?: number;
   players: PlayerConfig[];
+  suggestClues?: boolean;
+  timerSeconds?: number;
+  categories?: string[];
+  difficulty?: string;
   category?: string;
 }
 
@@ -24,15 +24,31 @@ function uid(prefix = "p") {
   return `${prefix}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function cleanName(raw: unknown, fallback: string): string {
+  const s = typeof raw === "string" ? raw.trim().slice(0, 24) : "";
+  return s || fallback;
+}
+
 export async function createGame(input: CreateGameInput) {
-  const { category, word } = await generateSecretWord();
+  const validCats = (input.categories ?? []).filter(
+    (c) => typeof c === "string" && c.trim(),
+  );
+  const difficulty =
+    input.difficulty === "easy" || input.difficulty === "hard"
+      ? input.difficulty
+      : "moderate";
+  const { category, word } = await generateSecretWord(
+    validCats.length ? validCats : undefined,
+    difficulty,
+  );
   // related word for imposter (different from secret)
   let imposterWord = randomWord().word;
   if (imposterWord.toLowerCase() === word.toLowerCase()) {
     imposterWord = randomWord().word;
   }
-  const total = input.opponentCount + 1;
-  // players: index 0 = human user, then opponents
+  const isManualGame = input.players.some((p) => p.type === "manual");
+  // Manual mode: every seat is named by the user (no special "you").
+  // AI mode: index 0 is the account owner, then opponents.
   const playerRows: {
     id: string;
     name: string;
@@ -40,23 +56,43 @@ export async function createGame(input: CreateGameInput) {
     personality?: string;
     avatarSeed: string;
   }[] = [];
-  playerRows.push({
-    id: "p0",
-    name: input.userName || "You",
-    type: "human",
-    avatarSeed: "human",
-  });
-  input.players.forEach((pc, i) => {
-    const idx = i + 1;
-    const pers = personalityForIndex(i);
-    playerRows.push({
-      id: `p${idx}`,
-      name: pc.type === "ai" ? pers.name : `Player ${idx}`,
-      type: pc.type,
-      personality: pc.type === "ai" ? pers.trait : undefined,
-      avatarSeed: `p${idx}`,
+  if (isManualGame) {
+    input.players.forEach((pc, i) => {
+      const pers = personalityForIndex(i);
+      playerRows.push({
+        id: `p${i}`,
+        name: cleanName(
+          pc.name,
+          pc.type === "ai" ? pers.name : `Player ${i + 1}`,
+        ),
+        type: pc.type,
+        personality: pc.type === "ai" ? pers.trait : undefined,
+        avatarSeed: `p${i}`,
+      });
     });
-  });
+  } else {
+    playerRows.push({
+      id: "p0",
+      name: cleanName(input.ownName, input.userName || "You"),
+      type: "human",
+      avatarSeed: "human",
+    });
+    input.players.forEach((pc, i) => {
+      const idx = i + 1;
+      const pers = personalityForIndex(i);
+      playerRows.push({
+        id: `p${idx}`,
+        name: cleanName(
+          pc.name,
+          pc.type === "ai" ? pers.name : `Player ${idx}`,
+        ),
+        type: pc.type,
+        personality: pc.type === "ai" ? pers.trait : undefined,
+        avatarSeed: `p${idx}`,
+      });
+    });
+  }
+  const total = playerRows.length;
 
   const imposterIndex = Math.floor(Math.random() * total);
   const imposterId = playerRows[imposterIndex].id;
@@ -72,10 +108,18 @@ export async function createGame(input: CreateGameInput) {
     secretWord: word,
     imposterWord,
     imposterPlayerId: imposterId,
-    opponentCount: input.opponentCount,
-    config: { players: input.players, category },
+    opponentCount: isManualGame ? total : (input.opponentCount ?? total),
+    config: {
+      mode: isManualGame ? "manual" : "ai",
+      players: input.players,
+      category,
+      suggestClues: input.suggestClues !== false,
+      timerSeconds: input.timerSeconds,
+      categories: validCats,
+      difficulty,
+    },
     status: "in_progress",
-    phase: "clue",
+    phase: isManualGame ? "reveal" : "clue",
     turnOrder,
     currentTurnIndex: 0,
   });
@@ -154,7 +198,26 @@ export async function advanceGame(gameId: string, userId: string) {
       return await loadGame(gameId);
     }
     const pid = turnOrder[idx];
-    if (!isAI(players, pid)) return current;
+    const occupant = players.find((p: any) => p.id === pid);
+    if (!isAI(players, pid)) {
+      // Manual seat: the human speaks their clue aloud — just move on.
+      if (occupant?.type === "manual") {
+        const nextIndex = idx + 1;
+        if (nextIndex >= turnOrder.length) {
+          await db
+            .update(games)
+            .set({ currentTurnIndex: nextIndex, phase: "discussion" })
+            .where(eq(games.id, gameId));
+        } else {
+          await db
+            .update(games)
+            .set({ currentTurnIndex: nextIndex })
+            .where(eq(games.id, gameId));
+        }
+        return await loadGame(gameId);
+      }
+      return current;
+    }
     const player = players.find((p: any) => p.id === pid)!;
     const prevClues = current.clues.map((c: any) => {
       const pl = players.find((p2: any) => p2.id === c.playerId);
@@ -228,29 +291,6 @@ export async function advanceGame(gameId: string, userId: string) {
     return await loadGame(gameId);
   }
 
-  if (g.phase === "guess") {
-    const imposter = players.find((p: any) => p.isImposter)!;
-    if (imposter.type === "ai") {
-      const clueList = current.clues.map((c: any) => {
-        const pl = players.find((p2: any) => p2.id === c.playerId);
-        return { name: pl?.name || c.playerId, clue: c.clueText };
-      });
-      const guessWord = await generateGuess({
-        playerName: imposter.name,
-        personality: imposter.personality || "balanced",
-        category: g.category,
-        clues: clueList,
-      });
-      const correct = guessWord.toLowerCase() === g.secretWord.toLowerCase();
-      await db
-        .insert(guesses)
-        .values({ gameId, playerId: imposter.id, guessWord, correct });
-      await completeGame(gameId, correct ? "imposter" : "crew");
-      return await loadGame(gameId);
-    }
-    return current;
-  }
-
   return current;
 }
 
@@ -286,13 +326,11 @@ async function finalizeVotes(gameId: string, data: any, players: any[]) {
   }
   if (!identified) {
     await completeGame(gameId, "imposter");
-    await db
-      .update(games)
-      .set({ phase: "results" })
-      .where(eq(games.id, gameId));
   } else {
-    await db.update(games).set({ phase: "guess" }).where(eq(games.id, gameId));
+    // Imposter caught: no final guess — crew wins immediately.
+    await completeGame(gameId, "crew");
   }
+  await db.update(games).set({ phase: "results" }).where(eq(games.id, gameId));
 }
 
 async function completeGame(gameId: string, winner: string) {
@@ -366,6 +404,14 @@ export async function submitClue(
   return { ok: true };
 }
 
+export async function startClues(gameId: string, userId: string) {
+  const data = await loadGame(gameId);
+  if (!data || data.game.userId !== userId) return { ok: false };
+  if (data.game.phase !== "reveal") return { ok: false };
+  await db.update(games).set({ phase: "clue" }).where(eq(games.id, gameId));
+  return { ok: true };
+}
+
 export async function startVoting(gameId: string, userId: string) {
   const data = await loadGame(gameId);
   if (!data || data.game.userId !== userId) return { ok: false };
@@ -407,30 +453,21 @@ export async function submitVote(
   return { ok: true };
 }
 
-export async function submitGuess(
+export async function revealWord(
   gameId: string,
   playerId: string,
-  guessWord: string,
   userId: string,
 ) {
   const data = await loadGame(gameId);
-  if (
-    !data ||
-    data.game.userId !== userId ||
-    data.game.status !== "in_progress"
-  )
-    return { ok: false, error: "invalid" };
-  if (data.game.phase !== "guess") return { ok: false, error: "wrong phase" };
-  const imposter = data.players.find((p: any) => p.isImposter)!;
-  if (playerId !== imposter.id) return { ok: false, error: "not imposter" };
+  if (!data || data.game.userId !== userId) return null;
+  if (data.game.status !== "in_progress") return null;
   const player = data.players.find((p: any) => p.id === playerId);
-  if (!player || player.type === "ai")
-    return { ok: false, error: "not allowed" };
-  const correct =
-    guessWord.trim().toLowerCase() === data.game.secretWord.toLowerCase();
-  await db.insert(guesses).values({ gameId, playerId, guessWord, correct });
-  await completeGame(gameId, correct ? "imposter" : "crew");
-  return { ok: true, correct };
+  if (!player) return null;
+  return {
+    playerId: player.id,
+    name: player.name,
+    word: player.isImposter ? data.game.imposterWord : data.game.secretWord,
+  };
 }
 
 export async function getPublicState(gameId: string, userId: string) {
@@ -441,28 +478,32 @@ export async function getPublicState(gameId: string, userId: string) {
   const humanPlayer = players.find((p: any) => p.type === "human"); // the account owner
   const isImposterSelf = humanPlayer?.isImposter ?? false;
   const completed = data.game.status === "completed";
+  const mode =
+    (data.game.config as any)?.mode ??
+    (players.some((p: any) => p.type === "manual") ? "manual" : "ai");
   return {
     id: data.game.id,
+    mode,
+    suggestionsEnabled: (data.game.config as any)?.suggestClues !== false,
+    timerSeconds: (data.game.config as any)?.timerSeconds ?? 180,
+    categories: (data.game.config as any)?.categories ?? [],
+    difficulty: (data.game.config as any)?.difficulty ?? "moderate",
     category: data.game.category,
     status: data.game.status,
     phase: data.game.phase,
     opponentCount: data.game.opponentCount,
-    secretWord: completed
-      ? data.game.secretWord
-      : isImposterSelf
-        ? data.game.imposterWord
-        : data.game.secretWord,
+    secretWord:
+      completed || mode === "manual"
+        ? completed
+          ? data.game.secretWord
+          : null
+        : isImposterSelf
+          ? data.game.imposterWord
+          : data.game.secretWord,
     imposterWord: completed ? data.game.imposterWord : null,
     isSelfImposter: isImposterSelf,
-    guesserType:
-      !completed && data.game.phase === "guess"
-        ? players.find((p: any) => p.isImposter)?.type === "ai"
-          ? "ai"
-          : "human"
-        : null,
     imposterPlayerId: completed ? data.game.imposterPlayerId : null,
-    votedOutId:
-      data.game.phase === "guess" || completed ? topVoted(data.votes) : null,
+    votedOutId: completed ? topVoted(data.votes) : null,
     winner: data.game.winner,
     turnOrder: data.game.turnOrder,
     currentTurnIndex: data.game.currentTurnIndex,

@@ -20,11 +20,12 @@ app.get("/", async (c) => {
     g.winner === "crew" ? false : false,
   ).length; // placeholder
   // Determine user wins: if user was imposter and imposter won, or user crew and crew won.
-  // Need check game_players. For simplicity, compute via stored imposterPlayerId and human player id p0.
+  // Manual games have no single "you", so personal stats cover AI games only.
+  const ranked = completed.filter((g) => (g.config as any)?.mode !== "manual");
   let userWins = 0;
   let imposterCount = 0;
   let imposterWins = 0;
-  for (const g of completed) {
+  for (const g of ranked) {
     // human player is p0
     const userWasImposter = g.imposterPlayerId === "p0";
     if (userWasImposter) imposterCount++;
@@ -34,9 +35,9 @@ app.get("/", async (c) => {
     if (userWon) userWins++;
     if (userWasImposter && g.winner === "imposter") imposterWins++;
   }
-  const losses = completed.length - userWins;
-  const winRate = completed.length
-    ? Math.round((userWins / completed.length) * 100)
+  const losses = ranked.length - userWins;
+  const winRate = ranked.length
+    ? Math.round((userWins / ranked.length) * 100)
     : 0;
   const imposterLosses = imposterCount - imposterWins;
   return c.json({
@@ -49,6 +50,7 @@ app.get("/", async (c) => {
       imposterCount,
       imposterWins,
       imposterLosses,
+      rankedGames: ranked.length,
     },
     recentGames: userGames.slice(0, 20).map((g) => ({
       id: g.id,
