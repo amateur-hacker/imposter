@@ -92,16 +92,17 @@ export async function generateSecretWord(
   const categoryLine =
     categories && categories.length > 0
       ? `Pick a category ONLY from this list: ${categories.join(", ")}.`
-      : "Choose any simple category (Animals, Food, Places, Objects, Jobs, Sports, Nature, Music, etc.).";
+      : "Choose any vivid category (Animals, Food, Places, Objects, Jobs, Sports, Nature, Music, etc.).";
   const difficultyLine =
     difficulty === "easy"
       ? "Use a very common, everyday word that everyone knows."
       : difficulty === "hard"
-        ? "Use a trickier, less obvious word that makes players think."
-        : "Use a common, everyday word (not obscure).";
-  const prompt = `Pick a random secret word for a party word-guessing game. Seed: ${seed}.
-Return ONLY valid JSON like: {"category":"Food","word":"Sushi"}
-${categoryLine} ${difficultyLine} Word can be one or two words. Make it different each time. No markdown.`;
+        ? "Use a specific, evocative word that is still guessable from clues (not ultra-obscure)."
+        : "Use a familiar but specific word — concrete and visual, not bland or generic.";
+  const prompt = `Pick a secret word for a party word-guessing game. Seed: ${seed}.
+Return ONLY valid JSON like: {"category":"Food","word":"Croissant"}
+${categoryLine} ${difficultyLine}
+Rules: one or two words; concrete noun players can picture; avoid bland fillers like "thing", "item", "food", "book" or repeats of obvious examples. Prefer lively, specific words (e.g. "Lighthouse", "Accordion", "Wasabi"). Make it different each time. No markdown.`;
   const out = await chat(prompt, 40);
   try {
     const match = out.match(/\{[\s\S]*\}/);

@@ -150,9 +150,14 @@ function SeatRow({
 
 export default function GamePage() {
   const [opponentCount, setOpponentCount] = useState<number>(3);
+  const [aiCount, setAiCount] = useState<number>(3);
+  const [manualCount, setManualCount] = useState<number>(4);
   const [mode, setMode] = useState<"ai" | "manual">("ai");
   const [ownName, setOwnName] = useState("You");
-  const [names, setNames] = useState<string[]>(["", "", "", ""]);
+  const [aiNames, setAiNames] = useState<string[]>(["", "", ""]);
+  const [manualNames, setManualNames] = useState<string[]>(["", "", "", ""]);
+  const names = mode === "ai" ? aiNames : manualNames;
+  const setNames = mode === "ai" ? setAiNames : setManualNames;
   const [seatTypes, setSeatTypes] = useState<("human" | "ai")[]>([
     "human",
     "human",
@@ -176,19 +181,77 @@ export default function GamePage() {
   const [clueInput, setClueInput] = useState("");
   const [voteTarget, setVoteTarget] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [definition, setDefinition] = useState<string | null>(null);
-  const [defLoading, setDefLoading] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [sugLoading, setSugLoading] = useState(false);
   const [meanings, setMeanings] = useState<Record<string, string>>({});
-  const [meaningLoading, setMeaningLoading] = useState<string | null>(null);
+  const [meaningPending, setMeaningPending] = useState<Record<string, boolean>>(
+    {},
+  );
+  const pendingMeanings = useRef(new Set<string>());
   const [revealIndex, setRevealIndex] = useState(0);
   const [revealWord, setRevealWord] = useState<string | null>(null);
-  const [revealDefinition, setRevealDefinition] = useState<string | null>(null);
-  const [revealDefLoading, setRevealDefLoading] = useState(false);
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const timerDone = useRef(false);
   const [setupLoaded, setSetupLoaded] = useState(false);
+
+  function meaningKey(word: string) {
+    return `${defLang}:${word.trim().toLowerCase()}`;
+  }
+
+  // Persisted per-word meaning cache: same word is never re-defined.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("imposter:meanings");
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (saved && typeof saved === "object") setMeanings(saved);
+      }
+    } catch {}
+  }, []);
+
+  async function ensureMeaning(
+    word: string | null | undefined,
+    playerId?: string,
+  ) {
+    if (!gameId || !word || !word.trim()) return;
+    const key = meaningKey(word);
+    if (meanings[key] || pendingMeanings.current.has(key)) return;
+    pendingMeanings.current.add(key);
+    setMeaningPending((prev) => ({ ...prev, [key]: true }));
+    try {
+      const res = await fetch(`/api/game/${gameId}/define`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          playerId ? { playerId, language: defLang } : { language: defLang },
+        ),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.definition) {
+        setMeanings((prev) => {
+          const next = { ...prev, [key]: data.definition };
+          try {
+            const entries = Object.entries(next).slice(-200);
+            localStorage.setItem(
+              "imposter:meanings",
+              JSON.stringify(Object.fromEntries(entries)),
+            );
+          } catch {}
+          return next;
+        });
+      }
+    } catch {
+      // meaning is optional; ignore failures silently
+    } finally {
+      pendingMeanings.current.delete(key);
+      setMeaningPending((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+  }
 
   // Persist setup names so they survive reloads and stay editable.
   useEffect(() => {
@@ -197,7 +260,8 @@ export default function GamePage() {
       if (raw) {
         const saved = JSON.parse(raw);
         if (typeof saved.ownName === "string") setOwnName(saved.ownName);
-        if (Array.isArray(saved.names)) setNames(saved.names);
+        if (Array.isArray(saved.aiNames)) setAiNames(saved.aiNames);
+        if (Array.isArray(saved.manualNames)) setManualNames(saved.manualNames);
         if (Array.isArray(saved.seatTypes)) {
           setSeatTypes(
             saved.seatTypes.filter((t: unknown) => t === "human" || t === "ai"),
@@ -240,6 +304,16 @@ export default function GamePage() {
         ) {
           setDefLang(saved.defLang);
         }
+        if (saved.aiCount === 3 || saved.aiCount === 5 || saved.aiCount === 7) {
+          setAiCount(saved.aiCount);
+        }
+        if (
+          saved.manualCount === 4 ||
+          saved.manualCount === 6 ||
+          saved.manualCount === 8
+        ) {
+          setManualCount(saved.manualCount);
+        }
       }
     } catch {}
     setSetupLoaded(true);
@@ -252,7 +326,8 @@ export default function GamePage() {
         "imposter:setup",
         JSON.stringify({
           ownName,
-          names,
+          aiNames,
+          manualNames,
           seatTypes,
           opponentCount,
           mode,
@@ -262,12 +337,15 @@ export default function GamePage() {
           categories,
           difficulty,
           defLang,
+          aiCount,
+          manualCount,
         }),
       );
     } catch {}
   }, [
     ownName,
-    names,
+    aiNames,
+    manualNames,
     seatTypes,
     opponentCount,
     mode,
@@ -277,6 +355,8 @@ export default function GamePage() {
     categories,
     difficulty,
     defLang,
+    aiCount,
+    manualCount,
     setupLoaded,
   ]);
 
@@ -335,6 +415,30 @@ export default function GamePage() {
     // biome-ignore lint/correctness/useExhaustiveDependencies: timer tick only
   }, [gameId, state, timeLeft]);
 
+  // Auto-define words when they appear: word card, reveal, results.
+  // Meanings are cached per word+language and never re-fetched.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fetch-once per word
+  useEffect(() => {
+    if (!state || state.mode !== "ai" || !state.secretWord) return;
+    ensureMeaning(state.secretWord);
+  }, [gameId, state?.secretWord, state?.mode, defLang]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fetch-once per word
+  useEffect(() => {
+    if (!state || !revealWord) return;
+    const pid = state.turnOrder[revealIndex];
+    ensureMeaning(revealWord, pid);
+  }, [gameId, revealWord, revealIndex, defLang]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fetch-once per word
+  useEffect(() => {
+    if (!state || state.phase !== "results") return;
+    for (const p of state.players) {
+      const word = p.isImposter ? state.imposterWord : state.secretWord;
+      if (word) ensureMeaning(word, p.id);
+    }
+  }, [gameId, state?.phase, defLang]);
+
   const loadState = useCallback(async (id: string) => {
     const res = await fetch(`/api/game/${id}`);
     if (!res.ok) throw new Error("Failed to load game");
@@ -345,12 +449,10 @@ export default function GamePage() {
   async function startGame() {
     setLoading(true);
     setError(null);
-    setDefinition(null);
     setSuggestions([]);
     setMeanings({});
     setRevealIndex(0);
     setRevealWord(null);
-    setRevealDefinition(null);
     setTimeLeft(null);
     timerDone.current = false;
     try {
@@ -497,12 +599,10 @@ export default function GamePage() {
     setGameId(null);
     setState(null);
     setError(null);
-    setDefinition(null);
     setSuggestions([]);
     setMeanings({});
     setRevealIndex(0);
     setRevealWord(null);
-    setRevealDefinition(null);
     setTimeLeft(null);
     timerDone.current = false;
   }
@@ -527,59 +627,20 @@ export default function GamePage() {
     }
   }
 
-  async function fetchRevealDefinition(playerId: string) {
-    if (!gameId || revealDefLoading || revealDefinition) return;
-    setRevealDefLoading(true);
-    try {
-      const res = await fetch(`/api/game/${gameId}/define`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ playerId, language: defLang }),
-      });
-      if (!res.ok) throw new Error("Could not load meaning");
-      const data = await res.json();
-      setRevealDefinition(data.definition);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setRevealDefLoading(false);
-    }
-  }
-
-  async function startClues() {
+  async function startDiscussion() {
     if (!gameId) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/game/${gameId}/start-clues`, {
+      const res = await fetch(`/api/game/${gameId}/start-discussion`, {
         method: "POST",
       });
       const data = await res.json();
       setState(data.state);
       setRevealWord(null);
-      setRevealDefinition(null);
     } catch (e: any) {
       setError(e.message);
     } finally {
       setBusy(false);
-    }
-  }
-
-  async function fetchMeaning(playerId: string) {
-    if (!gameId || meaningLoading || meanings[playerId]) return;
-    setMeaningLoading(playerId);
-    try {
-      const res = await fetch(`/api/game/${gameId}/define`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ playerId, language: defLang }),
-      });
-      if (!res.ok) throw new Error("Could not load meaning");
-      const data = await res.json();
-      setMeanings((prev) => ({ ...prev, [playerId]: data.definition }));
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setMeaningLoading(null);
     }
   }
 
@@ -600,42 +661,32 @@ export default function GamePage() {
     }
   }
 
-  async function fetchDefinition(playerId?: string) {
-    if (!gameId || defLoading || definition) return;
-    setDefLoading(true);
-    try {
-      const res = await fetch(`/api/game/${gameId}/define`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          playerId ? { playerId, language: defLang } : { language: defLang },
-        ),
-      });
-      if (!res.ok) throw new Error("Could not load meaning");
-      const data = await res.json();
-      setDefinition(data.definition);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setDefLoading(false);
-    }
-  }
-
-  function resizeSeats(size: number) {
-    setNames((prev) => {
+  function resizeSeats(targetMode: "ai" | "manual", size: number) {
+    const grow = (prev: string[]) => {
       const next = Array(size).fill("");
       for (let i = 0; i < next.length; i++) {
         if (prev[i]) next[i] = prev[i];
       }
       return next;
-    });
-    setSeatTypes((prev) => {
-      const next: ("human" | "ai")[] = Array(size).fill("human");
-      for (let i = 0; i < next.length; i++) {
-        if (prev[i]) next[i] = prev[i];
-      }
-      return next;
-    });
+    };
+    if (targetMode === "ai") {
+      setAiNames(grow);
+    } else {
+      setManualNames((prev) => {
+        const next = grow(prev);
+        if (ownName.trim() && next.every((n) => !n.trim())) {
+          next[0] = ownName.trim();
+        }
+        return next;
+      });
+      setSeatTypes((prev) => {
+        const next: ("human" | "ai")[] = Array(size).fill("human");
+        for (let i = 0; i < next.length; i++) {
+          if (prev[i]) next[i] = prev[i];
+        }
+        return next;
+      });
+    }
   }
 
   function handleSeatDragEnd(event: DragEndEvent) {
@@ -693,9 +744,9 @@ export default function GamePage() {
               }
               onClick={() => {
                 setMode(m.v);
-                const size = m.v === "ai" ? 3 : 4;
+                const size = m.v === "ai" ? aiCount : manualCount;
                 setOpponentCount(size);
-                resizeSeats(size);
+                resizeSeats(m.v, size);
               }}
             >
               <CardContent className="pt-6">
@@ -717,7 +768,12 @@ export default function GamePage() {
                 variant={opponentCount === n ? "default" : "outline"}
                 onClick={() => {
                   setOpponentCount(n);
-                  resizeSeats(n);
+                  if (mode === "ai") {
+                    setAiCount(n);
+                  } else {
+                    setManualCount(n);
+                  }
+                  resizeSeats(mode, n);
                 }}
               >
                 {mode === "ai" ? `${n} opponents` : `${n} players`}
@@ -997,7 +1053,7 @@ export default function GamePage() {
         : undefined;
   const phases =
     state.mode === "manual"
-      ? ["reveal", "clue", "discussion", "vote", "results"]
+      ? ["reveal", "discussion", "vote", "results"]
       : ["clue", "discussion", "vote", "results"];
   const phaseIndex = phases.indexOf(state.phase);
 
@@ -1028,29 +1084,17 @@ export default function GamePage() {
                   Someone else has a similar word — blend in.
                 </p>
               )}
-              {state.secretWord && (
-                <div className="mt-2">
-                  {!definition ? (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => fetchDefinition()}
-                      disabled={defLoading}
-                    >
-                      {defLoading ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <BookOpen className="h-4 w-4" />
-                      )}{" "}
-                      What does it mean?
-                    </Button>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">
-                      {definition}
-                    </p>
-                  )}
-                </div>
-              )}
+              {state.secretWord &&
+                (meanings[meaningKey(state.secretWord)] ? (
+                  <p className="text-sm text-muted-foreground mt-2">
+                    {meanings[meaningKey(state.secretWord)]}
+                  </p>
+                ) : meaningPending[meaningKey(state.secretWord)] ? (
+                  <p className="text-sm text-muted-foreground mt-2 flex items-center gap-2">
+                    <Loader2 className="h-3 w-3 animate-spin" /> Loading
+                    meaning…
+                  </p>
+                ) : null)}
             </div>
             <Badge variant={state.isSelfImposter ? "destructive" : "secondary"}>
               {state.isSelfImposter ? "Imposter" : "Crew"}
@@ -1098,39 +1142,33 @@ export default function GamePage() {
                       )}
                     </button>
                     {revealWord &&
-                      (!revealDefinition ? (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => fetchRevealDefinition(pid)}
-                          disabled={revealDefLoading}
-                        >
-                          {revealDefLoading ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <BookOpen className="h-4 w-4" />
-                          )}{" "}
-                          What does it mean?
-                        </Button>
-                      ) : (
+                      (meanings[meaningKey(revealWord)] ? (
                         <p className="text-sm text-muted-foreground">
-                          {revealDefinition}
+                          {meanings[meaningKey(revealWord)]}
                         </p>
-                      ))}
+                      ) : meaningPending[meaningKey(revealWord)] ? (
+                        <p className="text-sm text-muted-foreground flex items-center justify-center gap-2">
+                          <Loader2 className="h-3 w-3 animate-spin" /> Loading
+                          meaning…
+                        </p>
+                      ) : null)}
                     {!isLast ? (
                       <Button
                         size="lg"
                         onClick={() => {
                           setRevealWord(null);
-                          setRevealDefinition(null);
                           setRevealIndex(revealIndex + 1);
                         }}
                       >
                         Next
                       </Button>
                     ) : (
-                      <Button size="lg" onClick={startClues} disabled={busy}>
-                        Start clues
+                      <Button
+                        size="lg"
+                        onClick={startDiscussion}
+                        disabled={busy}
+                      >
+                        Start discussion
                       </Button>
                     )}
                   </>
@@ -1282,67 +1320,6 @@ export default function GamePage() {
                 <Loader2 className="h-4 w-4 animate-spin" /> Finishing clues...
               </div>
             )}
-          </CardContent>
-        </Card>
-      )}
-
-      {state.phase === "clue" && state.mode === "manual" && (
-        <Card className="mb-4">
-          <CardContent className="pt-6 text-center space-y-3">
-            {(() => {
-              const nextPid = state.turnOrder[state.currentTurnIndex + 1];
-              const nextPlayer = state.players.find((p) => p.id === nextPid);
-              if (!currentPlayer) {
-                return (
-                  <div className="flex items-center justify-center gap-2 text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" /> Finishing
-                    clues...
-                  </div>
-                );
-              }
-              return (
-                <>
-                  <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-muted text-2xl font-bold">
-                    {currentPlayer.name.charAt(0).toUpperCase()}
-                  </span>
-                  <div>
-                    <p className="text-xl font-bold">{currentPlayer.name}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {state.turnOrder[state.currentTurnIndex + 1]
-                        ? `Next: ${nextPlayer?.name}`
-                        : "Last turn"}
-                    </p>
-                  </div>
-                  {currentPlayer.type === "ai" ? (
-                    <div className="flex items-center justify-center gap-2 text-muted-foreground">
-                      <Loader2 className="h-4 w-4 animate-spin" />{" "}
-                      {currentPlayer.name} is thinking...
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => advance(gameId!)}
-                        disabled={busy}
-                      >
-                        Next
-                      </Button>
-                    </div>
-                  ) : (
-                    <>
-                      <p className="text-muted-foreground">
-                        Say your clue out loud, then continue.
-                      </p>
-                      <Button
-                        size="lg"
-                        onClick={() => advance(gameId!)}
-                        disabled={busy}
-                      >
-                        Next
-                      </Button>
-                    </>
-                  )}
-                </>
-              );
-            })()}
           </CardContent>
         </Card>
       )}
@@ -1577,25 +1554,15 @@ export default function GamePage() {
                     </div>
                     <p className="font-semibold">{word}</p>
                     {word &&
-                      (meanings[p.id] ? (
+                      (meanings[meaningKey(word)] ? (
                         <p className="text-xs text-muted-foreground">
-                          {meanings[p.id]}
+                          {meanings[meaningKey(word)]}
                         </p>
-                      ) : (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => fetchMeaning(p.id)}
-                          disabled={meaningLoading === p.id}
-                        >
-                          {meaningLoading === p.id ? (
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                          ) : (
-                            <BookOpen className="h-3 w-3" />
-                          )}{" "}
-                          Meaning
-                        </Button>
-                      ))}
+                      ) : meaningPending[meaningKey(word)] ? (
+                        <p className="text-xs text-muted-foreground flex items-center justify-center gap-1">
+                          <Loader2 className="h-3 w-3 animate-spin" /> Loading…
+                        </p>
+                      ) : null)}
                   </CardContent>
                 </Card>
               );

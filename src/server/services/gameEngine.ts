@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { clues, gamePlayers, games, guesses, votes } from "@/lib/db/schema";
 import { personalityForIndex } from "@/lib/game/personalities";
-import { randomWord } from "@/lib/game/words";
+import { CATEGORIES, randomWord } from "@/lib/game/words";
 import { generateClue, generateSecretWord, generateVote } from "./ai";
 
 export type PlayerConfig = { type: "ai" | "manual"; name?: string };
@@ -41,8 +41,14 @@ export async function createGame(input: CreateGameInput) {
     validCats.length ? validCats : undefined,
     difficulty,
   );
-  // related word for imposter (different from secret)
-  let imposterWord = randomWord().word;
+  // related word for imposter: same category, different word (blends in)
+  const catWords = (CATEGORIES[category] ?? []).filter(
+    (w) => w.toLowerCase() !== word.toLowerCase(),
+  );
+  let imposterWord =
+    catWords.length > 0
+      ? catWords[Math.floor(Math.random() * catWords.length)]
+      : randomWord().word;
   if (imposterWord.toLowerCase() === word.toLowerCase()) {
     imposterWord = randomWord().word;
   }
@@ -409,6 +415,17 @@ export async function startClues(gameId: string, userId: string) {
   if (!data || data.game.userId !== userId) return { ok: false };
   if (data.game.phase !== "reveal") return { ok: false };
   await db.update(games).set({ phase: "clue" }).where(eq(games.id, gameId));
+  return { ok: true };
+}
+
+export async function startDiscussion(gameId: string, userId: string) {
+  const data = await loadGame(gameId);
+  if (!data || data.game.userId !== userId) return { ok: false };
+  if (data.game.phase !== "reveal") return { ok: false };
+  await db
+    .update(games)
+    .set({ phase: "discussion" })
+    .where(eq(games.id, gameId));
   return { ok: true };
 }
 

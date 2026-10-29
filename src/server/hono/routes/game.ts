@@ -7,6 +7,7 @@ import {
   loadGame,
   revealWord,
   startClues,
+  startDiscussion,
   startVoting,
   submitClue,
   submitVote,
@@ -126,6 +127,15 @@ app.post("/:id/start-clues", async (c) => {
   const userId = (c as any).get("userId") as string;
   const id = c.req.param("id");
   const res = await startClues(id, userId);
+  if (!res.ok) return c.json({ error: "invalid" }, 400);
+  const state = await getPublicState(id, userId);
+  return c.json({ state });
+});
+
+app.post("/:id/start-discussion", async (c) => {
+  const userId = (c as any).get("userId") as string;
+  const id = c.req.param("id");
+  const res = await startDiscussion(id, userId);
   if (!res.ok) return c.json({ error: "invalid" }, 400);
   const state = await getPublicState(id, userId);
   return c.json({ state });
